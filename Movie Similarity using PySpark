@@ -1,0 +1,159 @@
+#######################################################################################################
+The sys module is imported because it provide a number of functions and variables that can be used during python programming
+From the pyspark module, SparkContext is imported as it is the main entry point for Spark functionality. Also SparkConf is imported to configure Spark.
+From the math module, sqrt function is imported to perform sqrt calculation
+#######################################################################################################
+import sys
+from pyspark import SparkConf, SparkContext
+from math import sqrt
+
+#######################################################################################################
+A function is defined with name loadMovieNames
+A variable movieNames is declared and is assigned with empty or null dictionary
+With open function is used to open the itemfile.text from its original location and store all its contents to a variable f
+Using a for loop, all the contents stored in variable ‘f’ is read
+Each line is read and stored to a variable fields after being split using split function with split parameter used as ‘|’.
+Dictionary movieNames is filled with key (which is converted to integer first) and with values which is decoded for ascii values using decode function (i.e., to ignore ascii characters). Also the fields variable is a string of arrays where the first index is the key and the second being the value.
+Returns the movieNames dictionary
+#######################################################################################################
+def loadMovieNames():
+    movieNames = {}
+    with open("/home/cloudera/moviedata/itemfile.txt") as f:
+        for line in f:
+            fields = line.split('|')
+            movieNames[int(fields[0])] = fields[1].decode('ascii', 'ignore')
+    return movieNames
+    
+#######################################################################################################
+A function makePairs is defined with arguments as user and ratings
+'ratings' is a string of array whose first index is used to provide value for first pair of movie and rating
+Second index is used to provide value for second pair of movie and rating
+Returns the two pairs of movie and ratings
+#######################################################################################################
+def makePairs((user, ratings)):
+    (movie1, rating1) = ratings[0]
+    (movie2, rating2) = ratings[1]
+    return ((movie1, movie2), (rating1, rating2))
+    
+#######################################################################################################
+Below a function filterDuplicates is defined which takes two arguments i.e., userID and ratings. 
+There might be possibility that same two movies are joined in two types of orders or a movie is joined to itself. 
+To remove the duplicates, we are using this function.
+#######################################################################################################
+def filterDuplicates( (userID, ratings) ):
+    (movie1, rating1) = ratings[0]
+    (movie2, rating2) = ratings[1]
+    return movie1 < movie2
+    
+ #######################################################################################################
+ Below a function computeCosineSimilarity is defined with argument ratingPairs. A simple variable numPairs is assigned a value of 0. 
+ Three other variables are taken and assigned a value of 0. So, the argument ratingPairs has two ratings (rating and rating lets say). 
+ We run through both the ratings of ratingPairs using a for loop and start using Cosine Similarity approach to find the similarities.
+ #######################################################################################################   
+def computeCosineSimilarity(ratingPairs):
+    numPairs = 0
+    sum_xx = sum_yy = sum_xy = 0
+    for ratingX, ratingY in ratingPairs:
+        sum_xx += ratingX * ratingX
+        sum_yy += ratingY * ratingY
+        sum_xy += ratingX * ratingY
+        numPairs += 1
+        
+####################################################################################################### 
+To calculate the Cosine similarity i.e., to check how data are similar, we calculate it mathematical operators and sqrt function. 
+So, basically its type of correlation comparison. Then we return the score and the number of pairs. 
+####################################################################################################### 
+    numerator = sum_xy
+    denominator = sqrt(sum_xx) * sqrt(sum_yy)
+
+    score = 0
+    if (denominator):
+        score = (numerator / (float(denominator)))
+
+    return (score, numPairs)
+    
+####################################################################################################### 
+Setup the spark context to connect with Spark.
+Print a generic statement
+Call the function loadMovieNames using a variable nameDict which is of type dictionary
+Read the data file by giving proper file path using spark context and create a RDD data
+####################################################################################################### 
+conf = SparkConf().setMaster("local[*]").setAppName("MovieSimilarities")
+sc = SparkContext(conf = conf)
+
+print "\nLoading movie names..."
+nameDict = loadMovieNames()
+
+data = sc.textFile("file:///home/cloudera/moviedata/datafile2.txt")
+
+#######################################################################################################
+The RDD data is then filter out using map function inside which lambda function is use to split the data. 
+Another map and lamda function is used to bring out the key value pair depending upon which all columns are required for key and value pair.
+A self join is done on the filtered RDD to find every possible combinations
+Using the filterDuplicates function, all the duplicate pairs are removed from the RDD list
+After removing the duplicates, the data is keyed by movie1 and movie 2 pairs.
+#######################################################################################################
+# Map ratings to key / value pairs: user ID => movie ID, rating
+ratings = data.map(lambda l: l.split()).map(lambda l: (int(l[0]), (int(l[1]), float(l[2]))))
+
+# Omit every movie rated together by the same user.
+# Self-join to find every combination.
+joinedRatings = ratings.join(ratings)
+
+# At this point our RDD consists of userID => ((movieID, rating), (movieID, rating))
+
+# Filter out duplicate pairs
+uniqueJoinedRatings = joinedRatings.filter(filterDuplicates)
+
+# Now key by (movie1, movie2) pairs.
+moviePairs = uniqueJoinedRatings.map(makePairs)
+
+#######################################################################################################
+groupByKey() function is used to group the values for each key in the RDD into a single sequence.
+Using the computeCosineSimilarity function, the similarities between two movies is calculated using Cosine similarity approach. 
+Cache function here is used to store the result in the primary memory
+#######################################################################################################
+# We now have (movie1, movie2) => (rating1, rating2)
+# Now collect all ratings for each movie pair and compute similarity
+moviePairRatings = moviePairs.groupByKey()
+
+# We now have (movie1, movie2) = > (rating1, rating2), (rating1, rating2) ...
+# Can now compute similarities.
+moviePairSimilarities = moviePairRatings.mapValues(computeCosineSimilarity).cache()
+
+#######################################################################################################
+Below is a check whether there are more than 1 arguments in the system argument lists.
+A score threshold of 0.10 i.e., we do not want to return results that are not very similar, so we set a minimum score of 0.10. 
+Also, a co-occurrence threshold of 2 is defined i.e., we only want similarities for movies that are rated together at least 2 times.
+The second system argument is read and stored in a variable.
+We get the user’s requested movie and filter the results. Here take function is used to get the first 10 results.
+#######################################################################################################
+# Save the results if desired
+#moviePairSimilarities.sortByKey()
+#moviePairSimilarities.saveAsTextFile("movie-sims")
+
+# Extract similarities for the movie we care about that are "good".
+if (len(sys.argv) > 1):
+
+    scoreThreshold = 0.10
+    coOccurenceThreshold = 2
+
+    movieID = int(sys.argv[1])
+
+    # Filter for movies with this sim that are "good" as defined by
+    # our quality thresholds above
+    filteredResults = moviePairSimilarities.filter(lambda((pair,sim)): \
+        (pair[0] == movieID or pair[1] == movieID) \
+        and sim[0] > scoreThreshold and sim[1] > coOccurenceThreshold)
+
+    # Sort by quality score.
+    results = filteredResults.map(lambda((pair,sim)): (sim, pair)).sortByKey(ascending = False).take(10)
+
+    print "Top 10 similar movies for " + nameDict[movieID]
+    for result in results:
+        (sim, pair) = result
+        # Display the similarity result that isn't the movie we're looking at
+        similarMovieID = pair[0]
+        if (similarMovieID == movieID):
+            similarMovieID = pair[1]
+        print nameDict[similarMovieID] + "\tscore: " + str(sim[0]) + "\tstrength: " + str(sim[1])
